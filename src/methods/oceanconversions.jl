@@ -8,8 +8,8 @@ The potential temperature and practical salinity variables in the `RasterStack` 
 by conservative temperature and absolute salinity. As pressure depends
 on latitude and depth, it is added as a new variable --- that is, each longitude, latitude,
 depth has a variable for pressure. A density variable is also computed which, by default, is
-_in-situ_ density. Potential density can be computed instead by passing a the keyword
-argument `p_ref`.
+_in-situ_ density. Potential density at a reference pressure can be computed instead by
+passing a the keyword argument `ref_pressure`.
 
 The name of the variables for potential temperature and salinity
 (either practical or absolute) must be passed in as a named tuple of the form
@@ -25,54 +25,56 @@ compute incorrect variables. Though for pressure we require _at least_ `Y` (lati
 If more methods are needed for different configurations of `dims` raise an issue on
 GitHub.
 """
-function convert_ocean_vars(raster::RasterStack, var_names::NamedTuple; p_ref = nothing)
+function convert_ocean_vars(raster::RasterStack, var_names::NamedTuple;
+                            ref_pressure = nothing)
 
     Sₚ = raster[var_names.sp]
     θ = raster[var_names.pt]
-    rs_dims = length(dims(Sₚ))==4 ? dims(Sₚ) : (dims(Sₚ)..., nothing)
-    p = convert_z_to_p(Sₚ, rs_dims)
-    Sₐ = convert_Sₚ_to_Sₐ(Sₚ, p, rs_dims)
-    Θ = convert_θ_to_Θ(θ, Sₐ, rs_dims)
+    rs_dims = length(dims(Sₚ))==4 ? (dims(Sₚ, X), dims(Sₚ, Y), dims(Sₚ, Z), dims(Sₚ, Ti)) :
+                                    (dims(Sₚ, X), dims(Sₚ, Y), dims(Sₚ, Z), nothing)
+    p = depth_to_pressure(Sₚ, rs_dims)
+    Sₐ = Sₚ_to_Sₐ(Sₚ, p, rs_dims)
+    Θ = θ_to_Θ(θ, Sₐ, rs_dims)
     converted_vars = (p = p, Sₐ = Sₐ, Θ = Θ)
-    ρ = isnothing(p_ref) ? in_situ_density(Sₐ, Θ, p, rs_dims) :
-                           potential_density(Sₐ, Θ, p_ref, rs_dims)
+    ρ = isnothing(ref_pressure) ? in_situ_density(Sₐ, Θ, p, rs_dims) :
+                                  potential_density(Sₐ, Θ, ref_pressure, rs_dims)
     converted_vars = (p = p, Sₐ = Sₐ, Θ = Θ, ρ = ρ)
 
     return RasterStack(converted_vars, rs_dims)
 
 end
-function convert_ocean_vars(raster_series::RasterSeries, var_names::NamedTuple; p_ref = nothing)
+function convert_ocean_vars(series::RasterSeries, var_names::NamedTuple; ref_pressure = nothing)
 
-    rs_array = Array{RasterStack}(undef, length(raster_series))
-    for i ∈ eachindex(raster_series)
-        rs_array[i] = convert_ocean_vars(raster_series[i], var_names; p_ref)
+    rs_array = Array{RasterStack}(undef, length(series))
+    for i ∈ eachindex(series)
+        rs_array[i] = convert_ocean_vars(series[i], var_names; ref_pressure)
     end
 
-    return RasterSeries(rs_array, dims(raster_series, Ti))
+    return RasterSeries(rs_array, dims(series, Ti))
 
 end
 
 """
-    function convert_z_to_p(raster::Raster)
+    function depth_to_pressure(raster::Raster)
 Convert the depth dimension (`Z`) to pressure using `gsw_p_from_z`. Note that pressure
 depends on depth and _latitude_ so the returned pressure is stored as a variable in the
 resulting `Raster` rather than a vertical dimension.
 """
-function convert_z_to_p(raster::Raster, rs_dims::Tuple)
+function depth_to_pressure(raster::Raster, rs_dims::Tuple)
 
     lons, lats, z, time = rs_dims
     p = similar(Array(raster))
     if isnothing(time)
-        for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
-            p[i, j, :] .= GibbsSeaWater.gsw_p_from_z.(z, lat)
-        end
+        lats_array = repeat(Array(lats)'; outer = (length(lons), 1, length(z)))
+        z_array = repeat(Array(z); outer = (1, length(lons), length(lats)))
+        z_array = permutedims(z_array, (2, 3, 1))
+        @. p = GibbsSeaWater.gsw_p_from_z(z_array, lats_array)
         rs_dims = (lons, lats, z)
     else
-        for t ∈ time
-            for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
-                p[i, j, :, t] .= GibbsSeaWater.gsw_p_from_z.(z, lat)
-            end
-        end
+        lats_array = repeat(Array(lats)'; outer = (length(lons), 1, length(z), length(time)))
+        z_array = repeat(Array(z); outer = (1, length(lons), length(lats), length(time)))
+        z_array = permutedims(z_array, (2, 3, 1, 4))
+        @. p = GibbsSeaWater.gsw_p_from_z(z_array, lats_array)
     end
 
     return Raster(p, rs_dims)
@@ -80,11 +82,11 @@ function convert_z_to_p(raster::Raster, rs_dims::Tuple)
 end
 
 """
-    function convert_Sₚ_to_Sₐ(raster::Raster, p::raster)
+    function Sₚ_to_Sₐ(raster::Raster, p::raster)
 Convert a `Raster` of practical salinity (`Sₚ`) to absolute salinity (`Sₐ`) using
 `gsw_sa_from_sp`.
 """
-function convert_Sₚ_to_Sₐ(Sₚ::Raster, p::Raster, rs_dims::Tuple)
+function Sₚ_to_Sₐ(Sₚ::Raster, p::Raster, rs_dims::Tuple)
 
     lons, lats, z, time = rs_dims
     Sₐ = similar(Array(Sₚ), Union{Float64, Missing})
@@ -116,11 +118,11 @@ function convert_Sₚ_to_Sₐ(Sₚ::Raster, p::Raster, rs_dims::Tuple)
 end
 
 """
-    function convert_θ_to_Θ(raster::Raster, Sₐ::raster)
+    function θ_to_Θ(raster::Raster, Sₐ::raster)
 Convert a `Raster` of potential temperature (`θ`) to conservative temperature (`Θ`) using
 `gsw_ct_from_pt`. This conversion depends on absolute salinity.
 """
-function convert_θ_to_Θ(θ::Raster, Sₐ::Raster, rs_dims::Tuple)
+function θ_to_Θ(θ::Raster, Sₐ::Raster, rs_dims::Tuple)
 
     lons, lats, z, time = rs_dims
     Θ = similar(Array(θ), Union{Float64, Missing})
