@@ -33,7 +33,7 @@ function convert_ocean_vars(raster::RasterStack, var_names::NamedTuple;
     rs_dims = length(dims(Sₚ))==4 ? (dims(Sₚ, X), dims(Sₚ, Y), dims(Sₚ, Z), dims(Sₚ, Ti)) :
                                     (dims(Sₚ, X), dims(Sₚ, Y), dims(Sₚ, Z), nothing)
     p = depth_to_pressure(Sₚ, rs_dims)
-    Sₐ = Sₚ_to_Sₐ(Sₚ, p, rs_dims)
+    Sₐ = Sₚ_to_Sₐ(θ, Sₚ, p, rs_dims)
     Θ = θ_to_Θ(θ, Sₐ, rs_dims)
     converted_vars = (p = p, Sₐ = Sₐ, Θ = Θ)
     ρ = isnothing(ref_pressure) ? in_situ_density(Sₐ, Θ, p, rs_dims) :
@@ -86,7 +86,7 @@ end
 Convert a `Raster` of practical salinity (`Sₚ`) to absolute salinity (`Sₐ`) using
 `gsw_sa_from_sp`.
 """
-function Sₚ_to_Sₐ(Sₚ::Raster, p::Raster, rs_dims::Tuple)
+function Sₚ_to_Sₐ(θ::Raster, Sₚ::Raster, p::Raster, rs_dims::Tuple)
 
     lons, lats, z, time = rs_dims
     Sₐ = similar(Array(Sₚ), Union{Float64, Missing})
@@ -94,9 +94,10 @@ function Sₚ_to_Sₐ(Sₚ::Raster, p::Raster, rs_dims::Tuple)
         for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
             Sₚ_profile = Sₚ[X(At(lon)), Y(At(lat))]
-            find_nm = findall(.!ismissing.(Sₚ_profile))
-            p_profile = p[X(At(lon)), Y(At(lat))]
-            Sₐ[i, j, find_nm] = GibbsSeaWater.gsw_sa_from_sp.(Sₚ_profile, p_profile, lon, lat)
+            θ_profile = θ[X(At(lon)), Y(At(lat))]
+            find_nm = findall(.!ismissing.(θ_profile) .&& .!ismissing.(Sₚ_profile))
+            p_profile = p[X(At(lon)), Y(At(lat)), Z(find_nm)]
+            Sₐ[i, j, find_nm] = GibbsSeaWater.gsw_sa_from_sp.(Sₚ_profile[find_nm], p_profile, lon, lat)
 
         end
         rs_dims = (lons, lats, z)
@@ -105,9 +106,10 @@ function Sₚ_to_Sₐ(Sₚ::Raster, p::Raster, rs_dims::Tuple)
             for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
                 Sₚ_profile = Sₚ[X(At(lon)), Y(At(lat)), Ti(t)]
-                find_nm = findall(.!ismissing.(Sₚ_profile))
-                p_profile = p[X(At(lon)), Y(At(lat)), Ti(t)]
-                Sₐ[i, j, find_nm, t] = GibbsSeaWater.gsw_sa_from_sp.(Sₚ_profile, p_profile, lon, lat)
+                θ_profile = θ[X(At(lon)), Y(At(lat)), Ti(t)]
+                find_nm = findall(.!ismissing.(θ_profile) .&& .!ismissing.(Sₚ_profile))
+                p_profile = p[X(At(lon)), Y(At(lat)), Ti(t), Z(find_nm)]
+                Sₐ[i, j, find_nm, t] = GibbsSeaWater.gsw_sa_from_sp.(Sₚ_profile[find_nm], p_profile, lon, lat)
 
             end
         end
@@ -131,9 +133,9 @@ function θ_to_Θ(θ::Raster, Sₐ::Raster, rs_dims::Tuple)
         for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
             Sₐ_profile = Sₐ[X(At(lon)), Y(At(lat))]
-            find_nm = findall(.!ismissing.(Sₐ_profile))
-            θ_profile = θ[X(At(lon)), Y(At(lat)), Z(find_nm)]
-            Θ[i, j, find_nm] = GibbsSeaWater.gsw_ct_from_pt.(Sₐ_profile[find_nm], θ_profile)
+            θ_profile = θ[X(At(lon)), Y(At(lat))]
+            find_nm = findall(.!ismissing.(θ_profile) .&& .!ismissing.(Sₐ_profile))
+            Θ[i, j, find_nm] = GibbsSeaWater.gsw_ct_from_pt.(Sₐ_profile[find_nm], θ_profile[find_nm])
 
         end
         rs_dims = (lons, lats, z)
@@ -142,9 +144,9 @@ function θ_to_Θ(θ::Raster, Sₐ::Raster, rs_dims::Tuple)
             for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
                 Sₐ_profile = Sₐ[X(At(lon)), Y(At(lat)), Ti(t)]
-                find_nm = findall(.!ismissing.(Sₐ_profile))
-                θ_profile = θ[X(At(lon)), Y(At(lat)), Z(find_nm), Ti(t)]
-                Θ[i, j, find_nm, t] = GibbsSeaWater.gsw_ct_from_pt.(Sₐ_profile[find_nm], θ_profile)
+                θ_profile = θ[X(At(lon)), Y(At(lat)), Ti(t)]
+                find_nm = findall(.!ismissing.(θ_profile) .&& .!ismissing.(Sₐ_profile))
+                Θ[i, j, find_nm, t] = GibbsSeaWater.gsw_ct_from_pt.(Sₐ_profile[find_nm], θ_profile[find_nm])
 
             end
         end
@@ -161,16 +163,16 @@ Compute in-situ density using `gsw_rho`.
 function in_situ_density(Sₐ::Raster, Θ::Raster, p::Raster, rs_dims::Tuple)
 
     lons, lats, z, time = rs_dims
-    ρ = similar(Array(Θ), Union{Float64, Missing})
+    ρ = similar(Array(Θ))
 
     if isnothing(time)
         for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
             Sₐ_profile = Sₐ[X(At(lon)), Y(At(lat))]
-            find_nm = findall(.!ismissing.(Sₐ_profile))
-            Θ_profile = Θ[X(At(lon)), Y(At(lat)), Z(find_nm)]
-            p_profile = p[X(At(lon)), Y(At(lat)), Z(find_nm)]
-            ρ[i, j, find_nm] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile, p_profile)
+            Θ_profile = Θ[X(At(lon)), Y(At(lat))]
+            find_nm = findall(.!ismissing.(Sₐ_profile) .&& .!ismissing.(Θ_profile))
+            p_profile = p[X(At(lon)), Y(At(lat))]
+            ρ[i, j, find_nm] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile[find_nm], p_profile[find_nm])
 
         end
         rs_dims = (lons, lats, z)
@@ -179,10 +181,10 @@ function in_situ_density(Sₐ::Raster, Θ::Raster, p::Raster, rs_dims::Tuple)
             for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
                 Sₐ_profile = Sₐ[X(At(lon)), Y(At(lat)), Ti(t)]
-                find_nm = findall(.!ismissing.(Sₐ_profile))
-                Θ_profile = Θ[X(At(lon)), Y(At(lat)), Z(find_nm), Ti(t)]
+                Θ_profile = Θ[X(At(lon)), Y(At(lat)), Ti(t)]
+                find_nm = findall(.!ismissing.(Sₐ_profile) .&& .!ismissing.(Θ_profile))
                 p_profile = p[X(At(lon)), Y(At(lat)), Z(find_nm), Ti(t)]
-                ρ[i, j, find_nm, t] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile, p_profile)
+                ρ[i, j, find_nm, t] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile[find_nm], p_profile)
 
             end
         end
@@ -199,15 +201,15 @@ Compute potential density at reference pressure `p` using `gsw_rho`.
 function potential_density(Sₐ::Raster, Θ::Raster, p::Float64, rs_dims::Tuple)
 
     lons, lats, z, time = rs_dims
-    ρ = similar(Array(Θ), Union{Float64, Missing})
+    ρ = similar(Array(Θ))
 
     if isnothing(time)
         for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
             Sₐ_profile = Sₐ[X(At(lon)), Y(At(lat))]
-            find_nm = findall(.!ismissing.(Sₐ_profile))
-            Θ_profile = Θ[X(At(lon)), Y(At(lat)), Z(find_nm)]
-            ρ[i, j, find_nm] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile, p)
+            Θ_profile = Θ[X(At(lon)), Y(At(lat))]
+            find_nm = findall(.!ismissing.(Sₐ_profile) .&& .!ismissing.(Θ_profile))
+            ρ[i, j, find_nm] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile[find_nm], p)
 
         end
         rs_dims = (lons, lats, z)
@@ -216,9 +218,9 @@ function potential_density(Sₐ::Raster, Θ::Raster, p::Float64, rs_dims::Tuple)
             for (i, lon) ∈ enumerate(lons), (j, lat) ∈ enumerate(lats)
 
                 Sₐ_profile = Sₐ[X(At(lon)), Y(At(lat)), Ti(t)]
-                find_nm = findall(.!ismissing.(Sₐ_profile))
-                Θ_profile = Θ[X(At(lon)), Y(At(lat)), Z(find_nm), Ti(t)]
-                ρ[i, j, find_nm, t] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile, p)
+                Θ_profile = Θ[X(At(lon)), Y(At(lat)), Ti(t)]
+                find_nm = findall(.!ismissing.(Sₐ_profile) .&& .!ismissing.(Θ_profile))
+                ρ[i, j, find_nm, t] = GibbsSeaWater.gsw_rho.(Sₐ_profile[find_nm], Θ_profile[find_nm], p)
 
             end
         end
